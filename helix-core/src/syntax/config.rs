@@ -59,6 +59,12 @@ pub struct LanguageConfiguration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formatter: Option<FormatterConfiguration>,
 
+    /// Regex patterns (with named capture groups) used to parse compiler output
+    /// for `:make`. Named groups: `file` (required), `line` (required),
+    /// `col` (optional), `severity` (optional), `message` (required).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_formats: Vec<ErrorFormatConfiguration>,
+
     /// If set, overrides `editor.path-completion`.
     pub path_completion: Option<bool>,
     /// If set, overrides `editor.word-completion`.
@@ -454,6 +460,20 @@ pub struct FormatterConfiguration {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+}
+
+/// A pattern used to parse a single line of compiler/build-tool output.
+///
+/// The `pattern` field is a regex with named capture groups:
+/// - `file` (required) — source file path (relative or absolute)
+/// - `line` (required) — 1-based line number
+/// - `col`  (optional) — 1-based column number
+/// - `severity` (optional) — "error", "warning", "note", or "info"
+/// - `message` (required) — diagnostic message text
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ErrorFormatConfiguration {
+    pub pattern: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
