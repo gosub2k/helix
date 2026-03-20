@@ -4,7 +4,7 @@ use crate::{
     document::{
         DocumentOpenError, DocumentSavedEventFuture, DocumentSavedEventResult, Mode, SavePoint,
     },
-    events::{DocumentDidClose, DocumentDidOpen, DocumentFocusLost},
+    events::{DiagnosticsDidChange, DocumentDidClose, DocumentDidOpen, DocumentFocusLost},
     graphics::{CursorKind, Rect},
     handlers::Handlers,
     info::Info,
@@ -45,7 +45,9 @@ use anyhow::{anyhow, bail, Error};
 pub use helix_core::diagnostic::Severity;
 use helix_core::{
     auto_pairs::AutoPairs,
-    diagnostic::DiagnosticProvider,
+    chars::char_is_word,
+    diagnostic::{Diagnostic, DiagnosticProvider},
+    diagnostic::Range as DiagnosticRange,
     syntax::{
         self,
         config::{AutoPairConfig, IndentationHeuristic, LanguageServerFeature, SoftWrap},
@@ -434,6 +436,13 @@ pub struct Config {
     pub buffer_picker: BufferPickerConfig,
     /// Whether to implicitly trust every workspace or not
     pub insecure: bool,
+    /// Command to run when `:make` is invoked with no arguments. Defaults to `"make"`.
+    #[serde(default = "default_make_command")]
+    pub make_command: String,
+}
+
+fn default_make_command() -> String {
+    "make".to_owned()
 }
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Clone, Copy)]
@@ -1157,6 +1166,7 @@ impl Default for Config {
             kitty_keyboard_protocol: Default::default(),
             buffer_picker: BufferPickerConfig::default(),
             insecure: false,
+            make_command: default_make_command(),
         }
     }
 }
@@ -1186,6 +1196,19 @@ pub struct Breakpoint {
 use futures_util::stream::{Flatten, Once};
 
 type Diagnostics = BTreeMap<Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>>;
+
+/// A diagnostic entry parsed from compiler/build-tool output (e.g. `:make`).
+#[derive(Debug, Clone)]
+pub struct ParsedError {
+    /// Absolute path to the source file.
+    pub path: PathBuf,
+    /// 1-based line number.
+    pub line: usize,
+    /// 1-based column number (optional).
+    pub col: Option<usize>,
+    pub severity: Severity,
+    pub message: String,
+}
 
 pub struct Editor {
     /// Current editing mode.
@@ -1259,6 +1282,11 @@ pub struct Editor {
 
     pub mouse_down_range: Option<Range>,
     pub cursor_cache: CursorCache,
+
+    /// Diagnostics parsed from the last `:make` run, kept for files not yet open.
+    pub compiler_diagnostics: Vec<ParsedError>,
+    /// Raw output from the last `:make` run, shown by `:make-output`.
+    pub last_make_output: Option<String>,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1382,6 +1410,8 @@ impl Editor {
             mouse_down_range: None,
             cursor_cache: CursorCache::default(),
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
+            compiler_diagnostics: Vec::new(),
+            last_make_output: None,
         }
     }
 
@@ -1958,6 +1988,8 @@ impl Editor {
                 doc: id,
             });
 
+            self.apply_pending_compiler_diagnostics(id);
+
             id
         };
 
@@ -2188,6 +2220,125 @@ impl Editor {
     }
 
     /// Returns all supported diagnostics for the document
+    /// Apply parsed compiler errors (from `:make`) to all currently open documents,
+    /// and store them for files that are not yet open.
+    pub fn set_compiler_diagnostics(&mut self, errors: Vec<ParsedError>) {
+        // Step 1: clear compiler diagnostics from all open documents
+        for doc in self.documents.values_mut() {
+            doc.replace_diagnostics(vec![], &[], Some(&DiagnosticProvider::Compiler));
+        }
+
+        // Step 2: group by canonical path, converting to Diagnostic per open document
+        let mut diag_map: BTreeMap<DocumentId, Vec<Diagnostic>> = BTreeMap::new();
+        let mut pending: Vec<ParsedError> = Vec::new();
+
+        for error in &errors {
+            let canonical = canonicalize(&error.path);
+            if let Some(doc_id) = self.document_id_by_path(&canonical) {
+                if let Some(doc) = self.documents.get(&doc_id) {
+                    let text = doc.text();
+                    let line_idx = error.line.saturating_sub(1);
+                    if line_idx < text.len_lines() {
+                        let line_start = text.line_to_char(line_idx);
+                        let col_offset = error.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
+                        let start = (line_start + col_offset).min(text.len_chars());
+                        let end = start;
+                        let ends_at_word =
+                            start != end && end != 0 && text.get_char(end - 1).is_some_and(char_is_word);
+                        let starts_at_word =
+                            start != end && text.get_char(start).is_some_and(char_is_word);
+                        diag_map.entry(doc_id).or_default().push(Diagnostic {
+                            range: DiagnosticRange { start, end },
+                            ends_at_word,
+                            starts_at_word,
+                            zero_width: start == end,
+                            line: line_idx,
+                            message: error.message.clone(),
+                            severity: Some(error.severity),
+                            code: None,
+                            tags: vec![],
+                            source: Some("make".to_string()),
+                            data: None,
+                            provider: DiagnosticProvider::Compiler,
+                        });
+                    }
+                }
+            } else {
+                pending.push(error.clone());
+            }
+        }
+
+        // Step 3: apply to open documents and dispatch change events
+        let doc_ids: Vec<DocumentId> = diag_map.keys().cloned().collect();
+        for doc_id in doc_ids {
+            let diags = diag_map.remove(&doc_id).unwrap_or_default();
+            if let Some(doc) = self.documents.get_mut(&doc_id) {
+                doc.replace_diagnostics(diags, &[], Some(&DiagnosticProvider::Compiler));
+            }
+            helix_event::dispatch(DiagnosticsDidChange {
+                editor: self,
+                doc: doc_id,
+            });
+        }
+
+        // Step 4: store pending errors for files not yet open
+        self.compiler_diagnostics = errors;
+    }
+
+    /// Apply any pending compiler diagnostics for the given document path.
+    fn apply_pending_compiler_diagnostics(&mut self, doc_id: DocumentId) {
+        let Some(doc) = self.documents.get(&doc_id) else {
+            return;
+        };
+        let Some(path) = doc.path() else {
+            return;
+        };
+        let canonical = canonicalize(path);
+
+        let mut diags: Vec<Diagnostic> = Vec::new();
+        let text = doc.text().clone();
+        for error in &self.compiler_diagnostics {
+            if canonicalize(&error.path) != canonical {
+                continue;
+            }
+            let line_idx = error.line.saturating_sub(1);
+            if line_idx >= text.len_lines() {
+                continue;
+            }
+            let line_start = text.line_to_char(line_idx);
+            let col_offset = error.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
+            let start = (line_start + col_offset).min(text.len_chars());
+            let end = start;
+            let ends_at_word =
+                start != end && end != 0 && text.get_char(end - 1).is_some_and(char_is_word);
+            let starts_at_word = start != end && text.get_char(start).is_some_and(char_is_word);
+            diags.push(Diagnostic {
+                range: DiagnosticRange { start, end },
+                ends_at_word,
+                starts_at_word,
+                zero_width: start == end,
+                line: line_idx,
+                message: error.message.clone(),
+                severity: Some(error.severity),
+                code: None,
+                tags: vec![],
+                source: Some("make".to_string()),
+                data: None,
+                provider: DiagnosticProvider::Compiler,
+            });
+        }
+
+        if !diags.is_empty() {
+            if let Some(doc) = self.documents.get_mut(&doc_id) {
+                doc.replace_diagnostics(diags, &[], Some(&DiagnosticProvider::Compiler));
+            }
+            helix_event::dispatch(DiagnosticsDidChange {
+                editor: self,
+                doc: doc_id,
+            });
+        }
+    }
+
     pub fn doc_diagnostics<'a>(
         language_servers: &'a helix_lsp::Registry,
         diagnostics: &'a Diagnostics,
