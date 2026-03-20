@@ -219,6 +219,9 @@ fn request_document_diagnostics_for_language_severs(
                     })
                     .await;
                 }
+                Some(Some((Err(_), DiagnosticProvider::Compiler, _))) => {
+                    // Compiler diagnostics don't use pull diagnostics; ignore.
+                }
                 Some(Some((Err(err), DiagnosticProvider::Lsp { server_id, .. }, _))) => {
                     let parsed_cancellation_data = if let helix_lsp::Error::Rpc(error) = err {
                         error.data.and_then(|data| {

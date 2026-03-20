@@ -1558,6 +1558,7 @@ dependencies = [
  "open",
  "parking_lot",
  "pulldown-cmark",
+ "regex",
  "same-file",
  "serde",
  "serde_json",

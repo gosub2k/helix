@@ -2894,6 +2894,240 @@ const WRITE_NO_FORMAT_FLAG: Flag = Flag {
     ..Flag::DEFAULT
 };
 
+// ─── :make support ──────────────────────────────────────────────────────────
+
+/// Run the build command, capturing stdout+stderr regardless of exit status.
+async fn shell_impl_async_unchecked(
+    shell: &[String],
+    cmd: &str,
+) -> anyhow::Result<String> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+    ensure!(!shell.is_empty(), "No shell set");
+
+    let mut process = Command::new(&shell[0]);
+    process
+        .args(&shell[1..])
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    let process = match process.spawn() {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("Failed to start shell: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    let output = process.wait_with_output().await?;
+    // Combine stdout and stderr so error messages from both streams are visible.
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(combined)
+}
+
+/// Parse a single line of compiler output against the supplied regex patterns.
+///
+/// Returns a `ParsedError` if any pattern matches and the required named groups
+/// (`file`, `line`, `message`) are present.
+fn parse_line(
+    line: &str,
+    patterns: &[regex::Regex],
+    cwd: &std::path::Path,
+) -> Option<helix_view::editor::ParsedError> {
+    use helix_core::diagnostic::Severity;
+
+    for re in patterns {
+        let caps = match re.captures(line) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let file = caps.name("file")?.as_str();
+        let line_str = caps.name("line")?.as_str();
+        let message = caps.name("message")?.as_str();
+
+        let line_num: usize = match line_str.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if line_num == 0 {
+            continue;
+        }
+
+        let col: Option<usize> = caps
+            .name("col")
+            .and_then(|m| m.as_str().parse().ok())
+            .filter(|&c: &usize| c > 0);
+
+        let severity = match caps
+            .name("severity")
+            .map(|m| m.as_str().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("error") | None => Severity::Error,
+            Some("warning") | Some("warn") => Severity::Warning,
+            Some("info") | Some("note") => Severity::Info,
+            _ => Severity::Error,
+        };
+
+        let path = std::path::Path::new(file);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+
+        return Some(helix_view::editor::ParsedError {
+            path,
+            line: line_num,
+            col,
+            severity,
+            message: message.to_owned(),
+        });
+    }
+    None
+}
+
+/// Parse the full output of a build command into a list of diagnostics.
+fn parse_compiler_output(
+    output: &str,
+    cwd: &std::path::Path,
+    error_formats: &[helix_core::syntax::config::ErrorFormatConfiguration],
+) -> Vec<helix_view::editor::ParsedError> {
+    // Compile patterns once.
+    let patterns: Vec<regex::Regex> = error_formats
+        .iter()
+        .filter_map(|ef| match regex::Regex::new(&ef.pattern) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                log::warn!("Invalid error-format pattern {:?}: {}", ef.pattern, e);
+                None
+            }
+        })
+        .collect();
+
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    output
+        .lines()
+        .filter_map(|line| parse_line(line, &patterns, cwd))
+        .collect()
+}
+
+fn make(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let shell = cx.editor.config().shell.clone();
+    let make_cmd = cx.editor.config().make_command.clone();
+    let extra_args = args.join(" ");
+    let cmd = if extra_args.is_empty() {
+        make_cmd
+    } else {
+        format!("{} {}", make_cmd, extra_args)
+    };
+
+    // Collect error formats from the current document's language config.
+    let error_formats: Vec<helix_core::syntax::config::ErrorFormatConfiguration> = {
+        let doc = doc!(cx.editor);
+        doc.language_config()
+            .map(|lc| lc.error_formats.clone())
+            .unwrap_or_default()
+    };
+
+    let cwd = helix_stdx::env::current_working_dir();
+
+    cx.editor.set_status("Building…");
+
+    let callback = async move {
+        let output = shell_impl_async_unchecked(&shell, &cmd).await?;
+        let errors = parse_compiler_output(&output, &cwd, &error_formats);
+
+        let call: job::Callback = Callback::EditorCompositor(Box::new(
+            move |editor: &mut Editor, _compositor: &mut Compositor| {
+                let error_count = errors
+                    .iter()
+                    .filter(|e| e.severity == helix_core::diagnostic::Severity::Error)
+                    .count();
+                let warn_count = errors
+                    .iter()
+                    .filter(|e| e.severity == helix_core::diagnostic::Severity::Warning)
+                    .count();
+
+                editor.last_make_output = Some(output.clone());
+                editor.set_compiler_diagnostics(errors);
+
+                if error_count > 0 || warn_count > 0 {
+                    editor.set_status(format!(
+                        "Build finished: {} error(s), {} warning(s)",
+                        error_count, warn_count
+                    ));
+                } else {
+                    editor.set_status("Build succeeded");
+                }
+            },
+        ));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
+
+    Ok(())
+}
+
+fn make_output(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let output = cx
+        .editor
+        .last_make_output
+        .clone()
+        .unwrap_or_else(|| "(no build output yet)".to_owned());
+
+    let syn_loader = cx.editor.syn_loader.clone();
+    let cursor_row = cx.editor.cursor().0.unwrap_or_default().row;
+
+    let callback = async move {
+        let call: job::Callback = Callback::EditorCompositor(Box::new(
+            move |_editor: &mut Editor, compositor: &mut Compositor| {
+                let contents = ui::Markdown::new(
+                    format!("```\n{}\n```", output.trim_end()),
+                    syn_loader.clone(),
+                );
+                let popup = Popup::new("make-output", contents)
+                    .position(Some(helix_core::Position::new(cursor_row, 2)));
+                compositor.replace_or_push("make-output", popup);
+            },
+        ));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "exit",
@@ -3864,6 +4098,28 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         fun: run_shell_command,
         completer: SHELL_COMPLETER,
         signature: SHELL_SIGNATURE,
+    },
+    TypableCommand {
+        name: "make",
+        aliases: &[],
+        doc: "Run the build command (default: make) and populate diagnostics from compiler output",
+        fun: make,
+        completer: SHELL_COMPLETER,
+        signature: Signature {
+            positionals: (0, None),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "make-output",
+        aliases: &[],
+        doc: "Show the raw output from the last :make invocation",
+        fun: make_output,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
     },
     TypableCommand {
         name: "reset-diff-change",
