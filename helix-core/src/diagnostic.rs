@@ -64,14 +64,15 @@ pub enum DiagnosticProvider {
         /// not clear the pull diagnostics and vice-versa.
         identifier: Option<Arc<str>>,
     },
-    // Future internal features can go here...
+    /// Diagnostics produced by a compiler or build tool via `:make`.
+    Compiler,
 }
 
 impl DiagnosticProvider {
     pub fn language_server_id(&self) -> Option<LanguageServerId> {
         match self {
             Self::Lsp { server_id, .. } => Some(*server_id),
-            // _ => None,
+            Self::Compiler => None,
         }
     }
 }
