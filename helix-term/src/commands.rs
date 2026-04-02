@@ -356,6 +356,7 @@ impl MappableCommand {
         extend_prev_char, "Extend to previous occurrence of char",
         repeat_last_motion, "Repeat last motion",
         replace, "Replace with new char",
+        append_single_char, "Append a single char after selection",
         switch_case, "Switch (toggle) case",
         switch_to_uppercase, "Switch to uppercase",
         switch_to_lowercase, "Switch to lowercase",
@@ -1760,6 +1761,38 @@ fn replace(cx: &mut Context) {
                 }
             });
 
+            doc.apply(&transaction, view.id);
+            exit_select_mode(cx);
+        }
+    })
+}
+
+fn append_single_char(cx: &mut Context) {
+    let mut buf = [0u8; 4];
+
+    cx.on_next_key(move |cx, event| {
+        let ch: Option<&str> = match event {
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                ..
+            } => Some(ch.encode_utf8(&mut buf[..])),
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => Some("\t"),
+            _ => None,
+        };
+
+        if let Some(ch) = ch {
+            let text = Tendril::from(ch);
+            let (view, doc) = current!(cx.editor);
+            let slice = doc.text().slice(..);
+            let selection = doc.selection(view.id);
+            let transaction =
+                Transaction::change_by_selection(doc.text(), selection, |range| {
+                    let line = range.cursor_line(slice);
+                    let pos = line_end_char_index(&slice, line);
+                    (pos, pos, Some(text.clone()))
+                });
             doc.apply(&transaction, view.id);
             exit_select_mode(cx);
         }
