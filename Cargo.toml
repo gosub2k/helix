@@ -24,6 +24,12 @@ default-members = [
 [profile.release]
 lto = "thin"
 
+[profile.fast-release]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 16
+
 [profile.opt]
 inherits = "release"
 lto = "fat"
