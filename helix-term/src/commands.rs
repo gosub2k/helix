@@ -1784,6 +1784,7 @@ fn append_single_char(cx: &mut Context) {
 
         if let Some(ch) = ch {
             let text = Tendril::from(ch);
+            let ch_len = text.chars().count();
             let (view, doc) = current!(cx.editor);
             let slice = doc.text().slice(..);
             let selection = doc.selection(view.id);
@@ -1794,6 +1795,16 @@ fn append_single_char(cx: &mut Context) {
                     (pos, pos, Some(text.clone()))
                 });
             doc.apply(&transaction, view.id);
+            // Move cursor to end of line (after the inserted char)
+            let (view, doc) = current!(cx.editor);
+            let slice = doc.text().slice(..);
+            let selection = doc.selection(view.id).clone().transform(|range| {
+                let line = range.cursor_line(slice);
+                let pos = graphemes::prev_grapheme_boundary(slice, line_end_char_index(&slice, line))
+                    .max(slice.line_to_char(line));
+                range.put_cursor(slice, pos, false)
+            });
+            doc.set_selection(view.id, selection);
             exit_select_mode(cx);
         }
     })
