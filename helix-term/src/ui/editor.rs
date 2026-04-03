@@ -19,6 +19,7 @@ use helix_core::{
     movement::Direction,
     syntax::{self, OverlayHighlights},
     text_annotations::TextAnnotations,
+    textobject::{self, TextObject},
     unicode::width::UnicodeWidthStr,
     visual_offset_from_block, Change, Position, Range, Selection, Transaction,
 };
@@ -44,6 +45,8 @@ pub struct EditorView {
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
+    /// Tracks click timing for double/triple click detection
+    last_click: Option<(std::time::Instant, u16, u16, u8)>, // (time, row, col, click_count)
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +70,7 @@ impl EditorView {
             completion: None,
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
+            last_click: None,
         }
     }
 
@@ -1219,6 +1223,21 @@ impl EditorView {
 
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Detect click count (double/triple click)
+                let now = std::time::Instant::now();
+                let click_count = match self.last_click {
+                    Some((last_time, last_row, last_col, count))
+                        if now.duration_since(last_time).as_millis() < 500
+                            && last_row == row
+                            && last_col == column =>
+                    {
+                        let new_count = if count >= 3 { 1 } else { count + 1 };
+                        new_count
+                    }
+                    _ => 1,
+                };
+                self.last_click = Some((now, row, column, click_count));
+
                 let editor = &mut cxt.editor;
 
                 if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
@@ -1227,7 +1246,20 @@ impl EditorView {
                     let prev_view_id = view!(editor).id;
                     let doc = doc_mut!(editor, &view!(editor, view_id).doc);
 
-                    if modifiers == KeyModifiers::ALT {
+                    if click_count == 2 {
+                        // Double click: select word
+                        let text = doc.text().slice(..);
+                        let range = Range::point(pos);
+                        let word_range = textobject::textobject_word(text, range, TextObject::Inside, 1, false);
+                        doc.set_selection(view_id, Selection::single(word_range.anchor, word_range.head));
+                    } else if click_count == 3 {
+                        // Triple click: select line
+                        let text = doc.text();
+                        let line = text.char_to_line(pos);
+                        let line_start = text.line_to_char(line);
+                        let line_end = text.line_to_char((line + 1).min(text.len_lines()));
+                        doc.set_selection(view_id, Selection::single(line_start, line_end));
+                    } else if modifiers == KeyModifiers::ALT {
                         let selection = doc.selection(view_id).clone();
                         doc.set_selection(view_id, selection.push(Range::point(pos)));
                     } else if editor.mode == Mode::Select {
