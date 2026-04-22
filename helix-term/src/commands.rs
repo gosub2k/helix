@@ -455,6 +455,8 @@ impl MappableCommand {
         goto_last_diag, "Goto last diagnostic",
         goto_next_diag, "Goto next diagnostic",
         goto_prev_diag, "Goto previous diagnostic",
+        goto_next_compiler_error, "Goto next compiler error",
+        goto_prev_compiler_error, "Goto previous compiler error",
         goto_next_change, "Goto next change",
         goto_prev_change, "Goto previous change",
         goto_first_change, "Goto first change",
@@ -4124,6 +4126,78 @@ fn goto_prev_diag(cx: &mut Context) {
             .immediately_show_diagnostic(doc, view.id);
     };
     cx.editor.apply_motion(motion)
+}
+
+fn goto_compiler_error(cx: &mut Context, reverse: bool) {
+    let len = cx.editor.compiler_diagnostics.len();
+    if len == 0 {
+        cx.editor.set_status("No compiler diagnostics");
+        return;
+    }
+
+    let next_idx = match cx.editor.compiler_diag_cursor {
+        None => {
+            if reverse {
+                len - 1
+            } else {
+                0
+            }
+        }
+        Some(cur) => {
+            if reverse {
+                (cur + len - 1) % len
+            } else {
+                (cur + 1) % len
+            }
+        }
+    };
+
+    let target = cx.editor.compiler_diagnostics[next_idx].clone();
+
+    let (origin_view, origin_doc) = current!(cx.editor);
+    push_jump(origin_view, origin_doc);
+
+    let current_path = doc!(cx.editor).path().map(|p| p.to_path_buf());
+    let same_file = current_path
+        .as_ref()
+        .map(|p| p == &target.path)
+        .unwrap_or(false);
+
+    if !same_file {
+        if let Err(e) = cx.editor.open(&target.path, Action::Replace) {
+            cx.editor.set_error(format!(
+                "Failed to open '{}': {}",
+                target.path.display(),
+                e
+            ));
+            return;
+        }
+    }
+
+    let (view, doc) = current!(cx.editor);
+    let text = doc.text();
+    let line_idx = target.line.saturating_sub(1).min(text.len_lines().saturating_sub(1));
+    let line_start = text.line_to_char(line_idx);
+    let col_offset = target.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
+    let pos = (line_start + col_offset).min(text.len_chars());
+    doc.set_selection(view.id, Selection::point(pos));
+    align_view(doc, view, Align::Center);
+
+    cx.editor.compiler_diag_cursor = Some(next_idx);
+    cx.editor.set_status(format!(
+        "[{}/{}] {}",
+        next_idx + 1,
+        len,
+        target.message.lines().next().unwrap_or("")
+    ));
+}
+
+fn goto_next_compiler_error(cx: &mut Context) {
+    goto_compiler_error(cx, false);
+}
+
+fn goto_prev_compiler_error(cx: &mut Context) {
+    goto_compiler_error(cx, true);
 }
 
 fn goto_first_change(cx: &mut Context) {

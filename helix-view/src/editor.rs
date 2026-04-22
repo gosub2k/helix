@@ -1285,6 +1285,9 @@ pub struct Editor {
 
     /// Diagnostics parsed from the last `:make` run, kept for files not yet open.
     pub compiler_diagnostics: Vec<ParsedError>,
+    /// Index into `compiler_diagnostics` for the currently-selected error
+    /// (driven by `]e` / `[e`). `None` means no selection yet.
+    pub compiler_diag_cursor: Option<usize>,
     /// Raw output from the last `:make` run, shown by `:make-output`.
     pub last_make_output: Option<String>,
 }
@@ -1411,6 +1414,7 @@ impl Editor {
             cursor_cache: CursorCache::default(),
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
             compiler_diagnostics: Vec::new(),
+            compiler_diag_cursor: None,
             last_make_output: None,
         }
     }
@@ -2283,6 +2287,8 @@ impl Editor {
 
         // Step 4: store pending errors for files not yet open
         self.compiler_diagnostics = errors;
+        // Reset the ]e / [e cursor so the next advance starts at the first entry.
+        self.compiler_diag_cursor = None;
     }
 
     /// Apply any pending compiler diagnostics for the given document path.
