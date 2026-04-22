@@ -12,5 +12,5 @@ cargo build --profile=fast-release -p helix-term
 cargo install --profile=fast-release --project=helix-term
 
 echo Helix still needs its runtime files at runtime (grammars/queries/themes).
-echo Either set HELIX_RUNTIME=/home/sebs/projects/helix/runtime in your shell rc, or copy/symlink the runtime/ directory to one of the standard locations (~/.config/helix/runtime, /usr/local/share/helix/runtime, etc.). cargo install won't handle that for you.
+echo Either set for example, HELIX_RUNTIME=~/projects/helix/runtime in your shell rc, or copy/symlink the runtime/ directory to one of the standard locations (~/.config/helix/runtime, /usr/local/share/helix/runtime, etc.). cargo install won't handle that for you.
 
