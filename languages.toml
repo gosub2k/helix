@@ -1170,6 +1170,9 @@ language-servers = ["ty", "ruff", "jedi", "pylsp"]
 # TODO: pyls needs utf-8 offsets
 indent = { tab-width = 4, unit = "    " }
 error-formats = [
+  # pytest short-tb / line-tb: `path/to/test.py:42: AssertionError: ...`
+  { pattern = "^(?P<file>[^:\\s][^:]*?\\.py):(?P<line>\\d+):\\s+(?P<message>.+)$" },
+  # Python traceback frame: `  File "foo.py", line 42, in func`
   { pattern = "^  File \"(?P<file>[^\"]+)\", line (?P<line>\\d+)(?:, in .+)?$" },
 ]
 

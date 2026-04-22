@@ -60,10 +60,19 @@ pub struct LanguageConfiguration {
     pub formatter: Option<FormatterConfiguration>,
 
     /// Regex patterns (with named capture groups) used to parse compiler output
-    /// for `:make`. Named groups: `file` (required), `line` (required),
-    /// `col` (optional), `severity` (optional), `message` (required).
+    /// for `:run` / `:test`. Named groups: `file` (required), `line` (required),
+    /// `col` (optional), `severity` (optional), `message` (optional).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub error_formats: Vec<ErrorFormatConfiguration>,
+
+    /// Command invoked by `:run` (no args). `%` expands to the current
+    /// buffer's path. Overrides `editor.run-command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_command: Option<String>,
+    /// Command invoked by `:test` (no args). `%` expands to the current
+    /// buffer's path. Overrides `editor.test-command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_command: Option<String>,
 
     /// If set, overrides `editor.path-completion`.
     pub path_completion: Option<bool>,

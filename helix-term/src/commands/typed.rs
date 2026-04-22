@@ -2897,10 +2897,11 @@ const WRITE_NO_FORMAT_FLAG: Flag = Flag {
 // ─── :make support ──────────────────────────────────────────────────────────
 
 /// Run the build command, capturing stdout+stderr regardless of exit status.
+/// Returns the combined output and the exit code (`None` if terminated by signal).
 async fn shell_impl_async_unchecked(
     shell: &[String],
     cmd: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Option<i32>)> {
     use std::process::Stdio;
     use tokio::process::Command;
     ensure!(!shell.is_empty(), "No shell set");
@@ -2930,13 +2931,34 @@ async fn shell_impl_async_unchecked(
         }
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
     }
-    Ok(combined)
+    Ok((combined, output.status.code()))
+}
+
+/// Push a scrollable read-only popup showing `:make`/`:make-output` contents.
+/// Keys: `Esc` / `Ctrl-c` close; `PageUp`/`PageDown` and `Ctrl-u`/`Ctrl-d` scroll.
+fn show_make_output_popup(
+    editor: &mut Editor,
+    compositor: &mut Compositor,
+    output: &str,
+) {
+    let body = if output.trim().is_empty() {
+        "(no build output)".to_owned()
+    } else {
+        format!("```\n{}\n```", output.trim_end())
+    };
+    let contents = ui::Markdown::new(body, editor.syn_loader.clone());
+    let cursor_row = editor.cursor().0.unwrap_or_default().row;
+    let popup = Popup::new("make-output", contents)
+        .position(Some(helix_core::Position::new(cursor_row, 2)));
+    compositor.replace_or_push("make-output", popup);
 }
 
 /// Parse a single line of compiler output against the supplied regex patterns.
 ///
-/// Returns a `ParsedError` if any pattern matches and the required named groups
-/// (`file`, `line`, `message`) are present.
+/// Requires named groups `file` and `line`; `message`, `col`, and `severity`
+/// are optional. (Python tracebacks, for example, put the file+line on one
+/// line and the exception message on a later line — we still emit a
+/// diagnostic at the file+line location with an empty message.)
 fn parse_line(
     line: &str,
     patterns: &[regex::Regex],
@@ -2952,7 +2974,7 @@ fn parse_line(
 
         let file = caps.name("file")?.as_str();
         let line_str = caps.name("line")?.as_str();
-        let message = caps.name("message")?.as_str();
+        let message = caps.name("message").map(|m| m.as_str()).unwrap_or("");
 
         let line_num: usize = match line_str.parse() {
             Ok(n) => n,
@@ -3024,42 +3046,30 @@ fn parse_compiler_output(
         .collect()
 }
 
-fn make(
+/// Shared implementation for `:run` and `:test`. Runs `cmd` through the user's
+/// shell, parses the output for compiler errors, shows a scrollable popup of
+/// the raw output (unconditionally), and reports exit status in the status bar.
+fn run_shell_cmd_with_output(
     cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
+    cmd: String,
+    label: &'static str,
 ) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
     let shell = cx.editor.config().shell.clone();
-    let make_cmd = cx.editor.config().make_command.clone();
-    let extra_args = args.join(" ");
-    let cmd = if extra_args.is_empty() {
-        make_cmd
-    } else {
-        format!("{} {}", make_cmd, extra_args)
-    };
-
-    // Collect error formats from the current document's language config.
     let error_formats: Vec<helix_core::syntax::config::ErrorFormatConfiguration> = {
         let doc = doc!(cx.editor);
         doc.language_config()
             .map(|lc| lc.error_formats.clone())
             .unwrap_or_default()
     };
-
     let cwd = helix_stdx::env::current_working_dir();
-
-    cx.editor.set_status("Building…");
+    cx.editor.set_status(format!("{label}…"));
 
     let callback = async move {
-        let output = shell_impl_async_unchecked(&shell, &cmd).await?;
+        let (output, exit_code) = shell_impl_async_unchecked(&shell, &cmd).await?;
         let errors = parse_compiler_output(&output, &cwd, &error_formats);
 
         let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, _compositor: &mut Compositor| {
+            move |editor: &mut Editor, compositor: &mut Compositor| {
                 let error_count = errors
                     .iter()
                     .filter(|e| e.severity == helix_core::diagnostic::Severity::Error)
@@ -3069,61 +3079,105 @@ fn make(
                     .filter(|e| e.severity == helix_core::diagnostic::Severity::Warning)
                     .count();
 
-                editor.last_make_output = Some(output.clone());
                 editor.set_compiler_diagnostics(errors);
+                show_make_output_popup(editor, compositor, &output);
 
-                if error_count > 0 || warn_count > 0 {
-                    editor.set_status(format!(
-                        "Build finished: {} error(s), {} warning(s)",
+                let status = match exit_code {
+                    Some(0) if error_count == 0 && warn_count == 0 => {
+                        format!("{label}: ok")
+                    }
+                    Some(0) => format!(
+                        "{label}: ok ({} error(s), {} warning(s) parsed)",
                         error_count, warn_count
-                    ));
-                } else {
-                    editor.set_status("Build succeeded");
-                }
+                    ),
+                    Some(code) => format!(
+                        "{label} failed (exit {code}): {} error(s), {} warning(s)",
+                        error_count, warn_count
+                    ),
+                    None => format!("{label} terminated by signal"),
+                };
+                editor.set_status(status);
             },
         ));
         Ok(call)
     };
     cx.jobs.callback(callback);
-
     Ok(())
 }
 
-fn make_output(
+/// Resolve the command for `:run` or `:test`:
+///   1. If the user supplied args, they ARE the command (no substitution, no lookup).
+///   2. Otherwise prefer the language-specific override, then fall back to the editor default.
+/// Finally expand the `%` token to the current buffer's path.
+fn resolve_build_cmd(
     cx: &mut compositor::Context,
-    _args: Args,
+    args: &Args,
+    lang_override: Option<String>,
+    editor_default: String,
+) -> String {
+    let extra = args.join(" ");
+    let template = if !extra.is_empty() {
+        extra
+    } else {
+        lang_override.unwrap_or(editor_default)
+    };
+
+    // Current buffer path, workspace-relative when possible.
+    let file_token = {
+        let doc = doc!(cx.editor);
+        doc.path().map(|p| {
+            let cwd = helix_stdx::env::current_working_dir();
+            p.strip_prefix(&cwd)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+
+    if template.contains('%') {
+        match file_token {
+            Some(f) => template.replace('%', &f),
+            None => {
+                cx.editor
+                    .set_error("`%` in command but current buffer has no path");
+                template
+            }
+        }
+    } else {
+        template
+    }
+}
+
+fn run_cmd(
+    cx: &mut compositor::Context,
+    args: Args,
     event: PromptEvent,
 ) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    let lang_override = doc!(cx.editor)
+        .language_config()
+        .and_then(|lc| lc.run_command.clone());
+    let editor_default = cx.editor.config().run_command.clone();
+    let cmd = resolve_build_cmd(cx, &args, lang_override, editor_default);
+    run_shell_cmd_with_output(cx, cmd, "Run")
+}
 
-    let output = cx
-        .editor
-        .last_make_output
-        .clone()
-        .unwrap_or_else(|| "(no build output yet)".to_owned());
-
-    let syn_loader = cx.editor.syn_loader.clone();
-    let cursor_row = cx.editor.cursor().0.unwrap_or_default().row;
-
-    let callback = async move {
-        let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |_editor: &mut Editor, compositor: &mut Compositor| {
-                let contents = ui::Markdown::new(
-                    format!("```\n{}\n```", output.trim_end()),
-                    syn_loader.clone(),
-                );
-                let popup = Popup::new("make-output", contents)
-                    .position(Some(helix_core::Position::new(cursor_row, 2)));
-                compositor.replace_or_push("make-output", popup);
-            },
-        ));
-        Ok(call)
-    };
-    cx.jobs.callback(callback);
-
-    Ok(())
+fn test_cmd(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let lang_override = doc!(cx.editor)
+        .language_config()
+        .and_then(|lc| lc.test_command.clone());
+    let editor_default = cx.editor.config().test_command.clone();
+    let cmd = resolve_build_cmd(cx, &args, lang_override, editor_default);
+    run_shell_cmd_with_output(cx, cmd, "Test")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4100,10 +4154,10 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         signature: SHELL_SIGNATURE,
     },
     TypableCommand {
-        name: "make",
+        name: "run",
         aliases: &[],
-        doc: "Run the build command (default: make) and populate diagnostics from compiler output",
-        fun: make,
+        doc: "Run the configured run command (default: make), show output in a popup, and populate diagnostics from parsed compiler output.",
+        fun: run_cmd,
         completer: SHELL_COMPLETER,
         signature: Signature {
             positionals: (0, None),
@@ -4111,13 +4165,13 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
-        name: "make-output",
+        name: "test",
         aliases: &[],
-        doc: "Show the raw output from the last :make invocation",
-        fun: make_output,
-        completer: CommandCompleter::none(),
+        doc: "Run the configured test command (default: make test), show output in a popup, and populate diagnostics from parsed compiler output.",
+        fun: test_cmd,
+        completer: SHELL_COMPLETER,
         signature: Signature {
-            positionals: (0, Some(0)),
+            positionals: (0, None),
             ..Signature::DEFAULT
         },
     },

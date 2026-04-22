@@ -436,13 +436,20 @@ pub struct Config {
     pub buffer_picker: BufferPickerConfig,
     /// Whether to implicitly trust every workspace or not
     pub insecure: bool,
-    /// Command to run when `:make` is invoked with no arguments. Defaults to `"make"`.
-    #[serde(default = "default_make_command")]
-    pub make_command: String,
+    /// Command executed by `:run` when no arguments are supplied. Defaults to `"make"`.
+    #[serde(default = "default_run_command")]
+    pub run_command: String,
+    /// Command executed by `:test` when no arguments are supplied. Defaults to `"make test"`.
+    #[serde(default = "default_test_command")]
+    pub test_command: String,
 }
 
-fn default_make_command() -> String {
+fn default_run_command() -> String {
     "make".to_owned()
+}
+
+fn default_test_command() -> String {
+    "make test".to_owned()
 }
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Clone, Copy)]
@@ -1166,7 +1173,8 @@ impl Default for Config {
             kitty_keyboard_protocol: Default::default(),
             buffer_picker: BufferPickerConfig::default(),
             insecure: false,
-            make_command: default_make_command(),
+            run_command: default_run_command(),
+            test_command: default_test_command(),
         }
     }
 }
@@ -1283,13 +1291,12 @@ pub struct Editor {
     pub mouse_down_range: Option<Range>,
     pub cursor_cache: CursorCache,
 
-    /// Diagnostics parsed from the last `:make` run, kept for files not yet open.
+    /// Diagnostics parsed from the last `:run` / `:test` invocation, kept for
+    /// files not yet open so they can be applied when those files are opened.
     pub compiler_diagnostics: Vec<ParsedError>,
     /// Index into `compiler_diagnostics` for the currently-selected error
-    /// (driven by `]e` / `[e`). `None` means no selection yet.
+    /// (driven by `]q` / `[q`). `None` means no selection yet.
     pub compiler_diag_cursor: Option<usize>,
-    /// Raw output from the last `:make` run, shown by `:make-output`.
-    pub last_make_output: Option<String>,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1415,7 +1422,6 @@ impl Editor {
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
             compiler_diagnostics: Vec::new(),
             compiler_diag_cursor: None,
-            last_make_output: None,
         }
     }
 
@@ -2261,7 +2267,7 @@ impl Editor {
                             severity: Some(error.severity),
                             code: None,
                             tags: vec![],
-                            source: Some("make".to_string()),
+                            source: Some("compiler".to_string()),
                             data: None,
                             provider: DiagnosticProvider::Compiler,
                         });
@@ -2328,7 +2334,7 @@ impl Editor {
                 severity: Some(error.severity),
                 code: None,
                 tags: vec![],
-                source: Some("make".to_string()),
+                source: Some("compiler".to_string()),
                 data: None,
                 provider: DiagnosticProvider::Compiler,
             });
