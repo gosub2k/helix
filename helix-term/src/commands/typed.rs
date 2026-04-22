@@ -2934,6 +2934,23 @@ async fn shell_impl_async_unchecked(
     Ok((combined, output.status.code()))
 }
 
+/// Build the centred, bordered, scrollable popup used to display raw
+/// `:run`/`:test` output. Pure constructor — callers decide where to push it.
+pub(super) fn build_output_popup(
+    editor: &Editor,
+    output: &str,
+) -> Popup<ui::Markdown> {
+    let body = if output.trim().is_empty() {
+        "(no build output)".to_owned()
+    } else {
+        format!("```\n{}\n```", output.trim_end())
+    };
+    let contents = ui::Markdown::new(body, editor.syn_loader.clone());
+    Popup::new("make-output", contents)
+        .centered(true)
+        .force_border(true)
+}
+
 /// Push a scrollable, centred, bordered read-only popup showing the output
 /// of a `:run` / `:test` invocation. Keys: `Esc` / `Ctrl-c` close;
 /// `PageUp`/`PageDown` and `Ctrl-u`/`Ctrl-d` scroll.
@@ -2942,15 +2959,7 @@ fn show_make_output_popup(
     compositor: &mut Compositor,
     output: &str,
 ) {
-    let body = if output.trim().is_empty() {
-        "(no build output)".to_owned()
-    } else {
-        format!("```\n{}\n```", output.trim_end())
-    };
-    let contents = ui::Markdown::new(body, editor.syn_loader.clone());
-    let popup = Popup::new("make-output", contents)
-        .centered(true)
-        .force_border(true);
+    let popup = build_output_popup(editor, output);
     compositor.replace_or_push("make-output", popup);
 }
 
@@ -3081,6 +3090,7 @@ fn run_shell_cmd_with_output(
                     .count();
 
                 editor.set_compiler_diagnostics(errors);
+                editor.last_run_output = Some(output.clone());
                 show_make_output_popup(editor, compositor, &output);
 
                 let status = match exit_code {
@@ -3179,6 +3189,34 @@ fn test_cmd(
     let editor_default = cx.editor.config().test_command.clone();
     let cmd = resolve_build_cmd(cx, &args, lang_override, editor_default);
     run_shell_cmd_with_output(cx, cmd, "Test")
+}
+
+fn show_output(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let output = match &cx.editor.last_run_output {
+        Some(o) => o.clone(),
+        None => {
+            cx.editor
+                .set_status("No :run/:test output yet");
+            return Ok(());
+        }
+    };
+    let callback = async move {
+        let call: job::Callback = Callback::EditorCompositor(Box::new(
+            move |editor: &mut Editor, compositor: &mut Compositor| {
+                show_make_output_popup(editor, compositor, &output);
+            },
+        ));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4173,6 +4211,17 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         completer: SHELL_COMPLETER,
         signature: Signature {
             positionals: (0, None),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "show-output",
+        aliases: &["output"],
+        doc: "Re-open the popup with the output from the last :run or :test.",
+        fun: show_output,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
             ..Signature::DEFAULT
         },
     },

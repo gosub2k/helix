@@ -458,6 +458,7 @@ impl MappableCommand {
         goto_next_compiler_error, "Goto next compiler error",
         goto_prev_compiler_error, "Goto previous compiler error",
         compiler_diagnostics_picker, "Open picker over compiler diagnostics",
+        show_run_output, "Re-open the last :run / :test output popup",
         goto_next_change, "Goto next change",
         goto_prev_change, "Goto previous change",
         goto_first_change, "Goto first change",
@@ -4207,6 +4208,18 @@ fn goto_next_compiler_error(cx: &mut Context) {
 
 fn goto_prev_compiler_error(cx: &mut Context) {
     goto_compiler_error(cx, true);
+}
+
+fn show_run_output(cx: &mut Context) {
+    let output = match cx.editor.last_run_output.clone() {
+        Some(o) => o,
+        None => {
+            cx.editor.set_status("No :run/:test output yet");
+            return;
+        }
+    };
+    let popup = typed::build_output_popup(cx.editor, &output);
+    cx.push_layer(Box::new(popup));
 }
 
 fn compiler_diagnostics_picker(cx: &mut Context) {

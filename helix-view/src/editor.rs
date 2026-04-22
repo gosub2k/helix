@@ -1205,7 +1205,7 @@ use futures_util::stream::{Flatten, Once};
 
 type Diagnostics = BTreeMap<Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>>;
 
-/// A diagnostic entry parsed from compiler/build-tool output (e.g. `:make`).
+/// A diagnostic entry parsed from compiler/build-tool output (e.g. `:run`).
 #[derive(Debug, Clone)]
 pub struct ParsedError {
     /// Absolute path to the source file.
@@ -1216,6 +1216,57 @@ pub struct ParsedError {
     pub col: Option<usize>,
     pub severity: Severity,
     pub message: String,
+}
+
+/// Convert a ParsedError into a core Diagnostic attached to `text`. The
+/// diagnostic range spans from the error column (or start of line) to the
+/// end of the logical line, so an underline renders in the editor.
+fn parsed_error_to_diagnostic(text: &helix_core::Rope, error: &ParsedError) -> Option<Diagnostic> {
+    let line_idx = error.line.saturating_sub(1);
+    if line_idx >= text.len_lines() {
+        return None;
+    }
+    let line_start = text.line_to_char(line_idx);
+    let col_offset = error.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
+    let start = (line_start + col_offset).min(text.len_chars());
+
+    // End of the logical line, excluding the line terminator so the underline
+    // doesn't bleed past visible text.
+    let line_end_char = if line_idx + 1 < text.len_lines() {
+        text.line_to_char(line_idx + 1)
+    } else {
+        text.len_chars()
+    };
+    let mut end = line_end_char;
+    while end > start
+        && text
+            .get_char(end - 1)
+            .is_some_and(|c| c == '\n' || c == '\r')
+    {
+        end -= 1;
+    }
+    // Guarantee a non-empty span so the underline is visible even on blank lines.
+    if end <= start {
+        end = (start + 1).min(text.len_chars());
+    }
+
+    let ends_at_word = end != 0 && text.get_char(end - 1).is_some_and(char_is_word);
+    let starts_at_word = text.get_char(start).is_some_and(char_is_word);
+
+    Some(Diagnostic {
+        range: DiagnosticRange { start, end },
+        ends_at_word,
+        starts_at_word,
+        zero_width: start == end,
+        line: line_idx,
+        message: error.message.clone(),
+        severity: Some(error.severity),
+        code: None,
+        tags: vec![],
+        source: Some("compiler".to_string()),
+        data: None,
+        provider: DiagnosticProvider::Compiler,
+    })
 }
 
 pub struct Editor {
@@ -1297,6 +1348,9 @@ pub struct Editor {
     /// Index into `compiler_diagnostics` for the currently-selected error
     /// (driven by `]q` / `[q`). `None` means no selection yet.
     pub compiler_diag_cursor: Option<usize>,
+    /// Raw combined stdout+stderr from the last `:run` / `:test`, retained so
+    /// the output popup can be re-opened via `:show-output` after dismissal.
+    pub last_run_output: Option<String>,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1422,6 +1476,7 @@ impl Editor {
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
             compiler_diagnostics: Vec::new(),
             compiler_diag_cursor: None,
+            last_run_output: None,
         }
     }
 
@@ -2246,31 +2301,8 @@ impl Editor {
             let canonical = canonicalize(&error.path);
             if let Some(doc_id) = self.document_id_by_path(&canonical) {
                 if let Some(doc) = self.documents.get(&doc_id) {
-                    let text = doc.text();
-                    let line_idx = error.line.saturating_sub(1);
-                    if line_idx < text.len_lines() {
-                        let line_start = text.line_to_char(line_idx);
-                        let col_offset = error.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
-                        let start = (line_start + col_offset).min(text.len_chars());
-                        let end = start;
-                        let ends_at_word =
-                            start != end && end != 0 && text.get_char(end - 1).is_some_and(char_is_word);
-                        let starts_at_word =
-                            start != end && text.get_char(start).is_some_and(char_is_word);
-                        diag_map.entry(doc_id).or_default().push(Diagnostic {
-                            range: DiagnosticRange { start, end },
-                            ends_at_word,
-                            starts_at_word,
-                            zero_width: start == end,
-                            line: line_idx,
-                            message: error.message.clone(),
-                            severity: Some(error.severity),
-                            code: None,
-                            tags: vec![],
-                            source: Some("compiler".to_string()),
-                            data: None,
-                            provider: DiagnosticProvider::Compiler,
-                        });
+                    if let Some(diag) = parsed_error_to_diagnostic(doc.text(), error) {
+                        diag_map.entry(doc_id).or_default().push(diag);
                     }
                 }
             } else {
@@ -2313,31 +2345,9 @@ impl Editor {
             if canonicalize(&error.path) != canonical {
                 continue;
             }
-            let line_idx = error.line.saturating_sub(1);
-            if line_idx >= text.len_lines() {
-                continue;
+            if let Some(diag) = parsed_error_to_diagnostic(&text, error) {
+                diags.push(diag);
             }
-            let line_start = text.line_to_char(line_idx);
-            let col_offset = error.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
-            let start = (line_start + col_offset).min(text.len_chars());
-            let end = start;
-            let ends_at_word =
-                start != end && end != 0 && text.get_char(end - 1).is_some_and(char_is_word);
-            let starts_at_word = start != end && text.get_char(start).is_some_and(char_is_word);
-            diags.push(Diagnostic {
-                range: DiagnosticRange { start, end },
-                ends_at_word,
-                starts_at_word,
-                zero_width: start == end,
-                line: line_idx,
-                message: error.message.clone(),
-                severity: Some(error.severity),
-                code: None,
-                tags: vec![],
-                source: Some("compiler".to_string()),
-                data: None,
-                provider: DiagnosticProvider::Compiler,
-            });
         }
 
         if !diags.is_empty() {
