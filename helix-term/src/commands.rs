@@ -457,6 +457,7 @@ impl MappableCommand {
         goto_prev_diag, "Goto previous diagnostic",
         goto_next_compiler_error, "Goto next compiler error",
         goto_prev_compiler_error, "Goto previous compiler error",
+        compiler_diagnostics_picker, "Open picker over compiler diagnostics",
         goto_next_change, "Goto next change",
         goto_prev_change, "Goto previous change",
         goto_first_change, "Goto first change",
@@ -4128,6 +4129,40 @@ fn goto_prev_diag(cx: &mut Context) {
     cx.editor.apply_motion(motion)
 }
 
+/// Open `error.path` (switching files with Action::Replace if necessary) and
+/// move the primary selection to the stored (line, col). Used by `]q`/`[q`
+/// and the compiler-diagnostics picker. Returns false on open failure.
+fn jump_to_parsed_error(editor: &mut Editor, error: &helix_view::editor::ParsedError) -> bool {
+    let (origin_view, origin_doc) = current!(editor);
+    push_jump(origin_view, origin_doc);
+
+    let current_path = doc!(editor).path().map(|p| p.to_path_buf());
+    let same_file = current_path
+        .as_ref()
+        .map(|p| p == &error.path)
+        .unwrap_or(false);
+
+    if !same_file {
+        if let Err(e) = editor.open(&error.path, Action::Replace) {
+            editor.set_error(format!("Failed to open '{}': {}", error.path.display(), e));
+            return false;
+        }
+    }
+
+    let (view, doc) = current!(editor);
+    let text = doc.text();
+    let line_idx = error
+        .line
+        .saturating_sub(1)
+        .min(text.len_lines().saturating_sub(1));
+    let line_start = text.line_to_char(line_idx);
+    let col_offset = error.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
+    let pos = (line_start + col_offset).min(text.len_chars());
+    doc.set_selection(view.id, Selection::point(pos));
+    align_view(doc, view, Align::Center);
+    true
+}
+
 fn goto_compiler_error(cx: &mut Context, reverse: bool) {
     let len = cx.editor.compiler_diagnostics.len();
     if len == 0 {
@@ -4153,35 +4188,9 @@ fn goto_compiler_error(cx: &mut Context, reverse: bool) {
     };
 
     let target = cx.editor.compiler_diagnostics[next_idx].clone();
-
-    let (origin_view, origin_doc) = current!(cx.editor);
-    push_jump(origin_view, origin_doc);
-
-    let current_path = doc!(cx.editor).path().map(|p| p.to_path_buf());
-    let same_file = current_path
-        .as_ref()
-        .map(|p| p == &target.path)
-        .unwrap_or(false);
-
-    if !same_file {
-        if let Err(e) = cx.editor.open(&target.path, Action::Replace) {
-            cx.editor.set_error(format!(
-                "Failed to open '{}': {}",
-                target.path.display(),
-                e
-            ));
-            return;
-        }
+    if !jump_to_parsed_error(cx.editor, &target) {
+        return;
     }
-
-    let (view, doc) = current!(cx.editor);
-    let text = doc.text();
-    let line_idx = target.line.saturating_sub(1).min(text.len_lines().saturating_sub(1));
-    let line_start = text.line_to_char(line_idx);
-    let col_offset = target.col.map(|c| c.saturating_sub(1)).unwrap_or(0);
-    let pos = (line_start + col_offset).min(text.len_chars());
-    doc.set_selection(view.id, Selection::point(pos));
-    align_view(doc, view, Align::Center);
 
     cx.editor.compiler_diag_cursor = Some(next_idx);
     cx.editor.set_status(format!(
@@ -4198,6 +4207,84 @@ fn goto_next_compiler_error(cx: &mut Context) {
 
 fn goto_prev_compiler_error(cx: &mut Context) {
     goto_compiler_error(cx, true);
+}
+
+fn compiler_diagnostics_picker(cx: &mut Context) {
+    use helix_core::diagnostic::Severity;
+    use tui::text::Span;
+
+    if cx.editor.compiler_diagnostics.is_empty() {
+        cx.editor
+            .set_status("No compiler diagnostics (run :run or :test first)");
+        return;
+    }
+
+    #[derive(Clone)]
+    struct PickerData {
+        error: helix_view::graphics::Style,
+        warning: helix_view::graphics::Style,
+        info: helix_view::graphics::Style,
+        hint: helix_view::graphics::Style,
+        cwd: PathBuf,
+    }
+    let data = PickerData {
+        error: cx.editor.theme.get("error"),
+        warning: cx.editor.theme.get("warning"),
+        info: cx.editor.theme.get("info"),
+        hint: cx.editor.theme.get("hint"),
+        cwd: helix_stdx::env::current_working_dir(),
+    };
+
+    let items: Vec<helix_view::editor::ParsedError> = cx.editor.compiler_diagnostics.clone();
+
+    let columns = vec![
+        PickerColumn::new(
+            "severity",
+            |item: &helix_view::editor::ParsedError, data: &PickerData| match item.severity {
+                Severity::Error => Span::styled("ERROR", data.error),
+                Severity::Warning => Span::styled("WARN", data.warning),
+                Severity::Info => Span::styled("INFO", data.info),
+                Severity::Hint => Span::styled("HINT", data.hint),
+            }
+            .into(),
+        ),
+        PickerColumn::new(
+            "path",
+            |item: &helix_view::editor::ParsedError, data: &PickerData| {
+                item.path
+                    .strip_prefix(&data.cwd)
+                    .unwrap_or(&item.path)
+                    .to_string_lossy()
+                    .into_owned()
+                    .into()
+            },
+        ),
+        PickerColumn::new(
+            "line",
+            |item: &helix_view::editor::ParsedError, _: &PickerData| match item.col {
+                Some(col) => format!("{}:{}", item.line, col).into(),
+                None => item.line.to_string().into(),
+            },
+        ),
+        PickerColumn::new(
+            "message",
+            |item: &helix_view::editor::ParsedError, _: &PickerData| {
+                item.message.lines().next().unwrap_or("").to_string().into()
+            },
+        ),
+    ];
+
+    let picker = Picker::new(columns, 3, items, data, |cx, item, _action| {
+        let target = item.clone();
+        jump_to_parsed_error(cx.editor, &target);
+    })
+    .with_preview(|_editor, item| {
+        let line = item.line.saturating_sub(1);
+        Some((item.path.as_path().into(), Some((line, line))))
+    })
+    .truncate_start(false);
+
+    cx.push_layer(Box::new(overlaid(picker)));
 }
 
 fn goto_first_change(cx: &mut Context) {

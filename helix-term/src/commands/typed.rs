@@ -2934,8 +2934,9 @@ async fn shell_impl_async_unchecked(
     Ok((combined, output.status.code()))
 }
 
-/// Push a scrollable read-only popup showing `:make`/`:make-output` contents.
-/// Keys: `Esc` / `Ctrl-c` close; `PageUp`/`PageDown` and `Ctrl-u`/`Ctrl-d` scroll.
+/// Push a scrollable, centred, bordered read-only popup showing the output
+/// of a `:run` / `:test` invocation. Keys: `Esc` / `Ctrl-c` close;
+/// `PageUp`/`PageDown` and `Ctrl-u`/`Ctrl-d` scroll.
 fn show_make_output_popup(
     editor: &mut Editor,
     compositor: &mut Compositor,
@@ -2947,9 +2948,9 @@ fn show_make_output_popup(
         format!("```\n{}\n```", output.trim_end())
     };
     let contents = ui::Markdown::new(body, editor.syn_loader.clone());
-    let cursor_row = editor.cursor().0.unwrap_or_default().row;
     let popup = Popup::new("make-output", contents)
-        .position(Some(helix_core::Position::new(cursor_row, 2)));
+        .centered(true)
+        .force_border(true);
     compositor.replace_or_push("make-output", popup);
 }
 

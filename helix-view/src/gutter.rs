@@ -74,21 +74,27 @@ pub fn diagnostic<'doc>(
                                 .any(|ls| ls.id() == id)
                         })
                 });
-            diagnostics_on_line.max_by_key(|d| d.severity).map(|d| {
-                use helix_core::diagnostic::DiagnosticProvider;
-                let glyph = if matches!(d.provider, DiagnosticProvider::Compiler) {
-                    "■"
-                } else {
-                    "●"
-                };
-                write!(out, "{glyph}").ok();
-                match d.severity {
-                    Some(Severity::Error) => error,
-                    Some(Severity::Warning) | None => warning,
-                    Some(Severity::Info) => info,
-                    Some(Severity::Hint) => hint,
-                }
-            })
+            // Compiler-sourced diagnostics win precedence over LSP on shared
+            // lines (tuple ordering: `true > false`), with severity deciding
+            // within each provider class. Keeps the square glyph visible
+            // whenever a :run/:test error overlaps an LSP diagnostic.
+            use helix_core::diagnostic::DiagnosticProvider;
+            diagnostics_on_line
+                .max_by_key(|d| (matches!(d.provider, DiagnosticProvider::Compiler), d.severity))
+                .map(|d| {
+                    let glyph = if matches!(d.provider, DiagnosticProvider::Compiler) {
+                        "■"
+                    } else {
+                        "●"
+                    };
+                    write!(out, "{glyph}").ok();
+                    match d.severity {
+                        Some(Severity::Error) => error,
+                        Some(Severity::Warning) | None => warning,
+                        Some(Severity::Info) => info,
+                        Some(Severity::Hint) => hint,
+                    }
+                })
         },
     )
 }

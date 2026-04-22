@@ -39,6 +39,8 @@ pub struct Popup<T: Component> {
     ignore_escape_key: bool,
     id: &'static str,
     has_scrollbar: bool,
+    centered: bool,
+    force_border: bool,
 }
 
 impl<T: Component> Popup<T> {
@@ -53,7 +55,24 @@ impl<T: Component> Popup<T> {
             ignore_escape_key: false,
             id,
             has_scrollbar: true,
+            centered: false,
+            force_border: false,
         }
+    }
+
+    /// Place the popup in the centre of the viewport at a fixed relative
+    /// size, bypassing cursor-anchor positioning. Used for things like
+    /// build output where the popup is a modal view, not a hint.
+    pub fn centered(mut self, on: bool) -> Self {
+        self.centered = on;
+        self
+    }
+
+    /// Force the popup to render a border regardless of
+    /// `editor.popup-border` configuration.
+    pub fn force_border(mut self, on: bool) -> Self {
+        self.force_border = on;
+        self
     }
 
     /// Set the anchor position next to which the popup should be drawn.
@@ -124,6 +143,52 @@ impl<T: Component> Popup<T> {
     }
 
     fn render_info(&mut self, viewport: Rect, editor: &Editor) -> RenderInfo {
+        let is_menu = self
+            .contents
+            .type_name()
+            .starts_with("helix_term::ui::menu::Menu");
+
+        // Centred mode: ignore cursor anchor, fill a fixed rect at the centre
+        // of the viewport. Used for modal output views.
+        if self.centered {
+            let render_borders = self.force_border
+                || if is_menu {
+                    editor.menu_border()
+                } else {
+                    editor.popup_border()
+                };
+            // 90% of viewport, matching the `overlaid()` helper used by pickers.
+            let width = (viewport.width * 9 / 10).max(10);
+            let height = (viewport.height * 9 / 10).max(5);
+            let x = viewport.x + viewport.width.saturating_sub(width) / 2;
+            let y = viewport.y + viewport.height.saturating_sub(height) / 2;
+            let area = Rect::new(x, y, width, height);
+
+            let inner_w = if render_borders {
+                width.saturating_sub(2)
+            } else {
+                width
+            };
+            let inner_h = if render_borders {
+                height.saturating_sub(2)
+            } else {
+                height
+            };
+            // Probe actual content height (bounded above by a large sentinel
+            // so scrolling still works for long output).
+            let (_, child_height) = self
+                .contents
+                .required_size((inner_w, u16::MAX / 2))
+                .unwrap_or((inner_w, inner_h));
+
+            return RenderInfo {
+                area,
+                child_height,
+                render_borders,
+                is_menu,
+            };
+        }
+
         let mut position = editor.cursor().0.unwrap_or_default();
         if let Some(old_position) = self
             .position
@@ -134,16 +199,14 @@ impl<T: Component> Popup<T> {
             self.position = Some(position);
         }
 
-        let is_menu = self
-            .contents
-            .type_name()
-            .starts_with("helix_term::ui::menu::Menu");
-
         let mut render_borders = if is_menu {
             editor.menu_border()
         } else {
             editor.popup_border()
         };
+        if self.force_border {
+            render_borders = true;
+        }
 
         // -- make sure frame doesn't stick out of bounds
         let mut rel_x = position.col as u16;
