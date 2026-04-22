@@ -75,7 +75,13 @@ pub fn diagnostic<'doc>(
                         })
                 });
             diagnostics_on_line.max_by_key(|d| d.severity).map(|d| {
-                write!(out, "●").ok();
+                use helix_core::diagnostic::DiagnosticProvider;
+                let glyph = if matches!(d.provider, DiagnosticProvider::Compiler) {
+                    "■"
+                } else {
+                    "●"
+                };
+                write!(out, "{glyph}").ok();
                 match d.severity {
                     Some(Severity::Error) => error,
                     Some(Severity::Warning) | None => warning,
