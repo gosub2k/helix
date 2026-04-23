@@ -1,3 +1,4 @@
+pub(crate) mod ansi;
 mod completion;
 mod document;
 pub(crate) mod editor;

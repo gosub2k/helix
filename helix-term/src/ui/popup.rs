@@ -41,6 +41,7 @@ pub struct Popup<T: Component> {
     has_scrollbar: bool,
     centered: bool,
     force_border: bool,
+    title: Option<String>,
 }
 
 impl<T: Component> Popup<T> {
@@ -57,7 +58,15 @@ impl<T: Component> Popup<T> {
             has_scrollbar: true,
             centered: false,
             force_border: false,
+            title: None,
         }
+    }
+
+    /// Display `title` inside the top border. Only visible when a border
+    /// is actually rendered (either via editor config or `force_border`).
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
     }
 
     /// Place the popup in the centre of the viewport at a fixed relative
@@ -401,7 +410,21 @@ impl<T: Component> Component for Popup<T> {
         let mut inner = area;
         if render_borders {
             inner = area.inner(Margin::all(1));
-            Widget::render(Block::bordered(), area, surface);
+            let mut block = Block::bordered();
+            if let Some(ref t) = self.title {
+                // Truncate overlong titles so they don't punch through the
+                // right border; Block::title takes Spans<'static>.
+                let max = area.width.saturating_sub(4) as usize; // borders + padding
+                let text = if t.chars().count() > max && max > 3 {
+                    let mut s: String = t.chars().take(max.saturating_sub(1)).collect();
+                    s.push('…');
+                    s
+                } else {
+                    t.clone()
+                };
+                block = block.title(format!(" {} ", text));
+            }
+            Widget::render(block, area, surface);
         }
         let border = usize::from(render_borders);
 

@@ -2912,7 +2912,14 @@ async fn shell_impl_async_unchecked(
         .arg(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        // Encourage tools to emit ANSI colour even though we're piping.
+        // Known env vars for: generic CLIs, pytest, clicolor-aware tools,
+        // and cargo's terminal handling.
+        .env("FORCE_COLOR", "1")
+        .env("PY_COLORS", "1")
+        .env("CLICOLOR_FORCE", "1")
+        .env("CARGO_TERM_COLOR", "always");
 
     let process = match process.spawn() {
         Ok(p) => p,
@@ -2935,20 +2942,24 @@ async fn shell_impl_async_unchecked(
 }
 
 /// Build the centred, bordered, scrollable popup used to display raw
-/// `:run`/`:test` output. Pure constructor — callers decide where to push it.
+/// `:run`/`:test` output. Parses ANSI SGR escapes so pytest/cargo/etc
+/// output is coloured like the terminal. `title` is shown in the top
+/// border; pass the exact command that produced the output.
 pub(super) fn build_output_popup(
-    editor: &Editor,
+    _editor: &Editor,
+    title: &str,
     output: &str,
-) -> Popup<ui::Markdown> {
+) -> Popup<crate::ui::ansi::AnsiText> {
     let body = if output.trim().is_empty() {
         "(no build output)".to_owned()
     } else {
-        format!("```\n{}\n```", output.trim_end())
+        output.to_owned()
     };
-    let contents = ui::Markdown::new(body, editor.syn_loader.clone());
+    let contents = crate::ui::ansi::AnsiText::new(&body);
     Popup::new("make-output", contents)
         .centered(true)
         .force_border(true)
+        .title(title.to_owned())
 }
 
 /// Push a scrollable, centred, bordered read-only popup showing the output
@@ -2957,9 +2968,10 @@ pub(super) fn build_output_popup(
 fn show_make_output_popup(
     editor: &mut Editor,
     compositor: &mut Compositor,
+    title: &str,
     output: &str,
 ) {
-    let popup = build_output_popup(editor, output);
+    let popup = build_output_popup(editor, title, output);
     compositor.replace_or_push("make-output", popup);
 }
 
@@ -3127,6 +3139,7 @@ fn run_shell_cmd_with_output(
     let cwd = helix_stdx::env::current_working_dir();
     cx.editor.set_status(format!("{label}…"));
 
+    let cmd_for_title = cmd.clone();
     let callback = async move {
         let (output, exit_code) = shell_impl_async_unchecked(&shell, &cmd).await?;
         let errors = parse_compiler_output(&output, &cwd, &error_formats);
@@ -3144,7 +3157,8 @@ fn run_shell_cmd_with_output(
 
                 editor.set_compiler_diagnostics(errors);
                 editor.last_run_output = Some(output.clone());
-                show_make_output_popup(editor, compositor, &output);
+                editor.last_run_cmd = Some(cmd_for_title.clone());
+                show_make_output_popup(editor, compositor, &cmd_for_title, &output);
 
                 let status = match exit_code {
                     Some(0) if error_count == 0 && warn_count == 0 => {
@@ -3260,10 +3274,15 @@ fn show_output(
             return Ok(());
         }
     };
+    let title = cx
+        .editor
+        .last_run_cmd
+        .clone()
+        .unwrap_or_else(|| "output".to_string());
     let callback = async move {
         let call: job::Callback = Callback::EditorCompositor(Box::new(
             move |editor: &mut Editor, compositor: &mut Compositor| {
-                show_make_output_popup(editor, compositor, &output);
+                show_make_output_popup(editor, compositor, &title, &output);
             },
         ));
         Ok(call)

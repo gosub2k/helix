@@ -1351,6 +1351,9 @@ pub struct Editor {
     /// Raw combined stdout+stderr from the last `:run` / `:test`, retained so
     /// the output popup can be re-opened via `:show-output` after dismissal.
     pub last_run_output: Option<String>,
+    /// The exact shell command (post `%` expansion) that produced
+    /// `last_run_output`. Used as the popup title.
+    pub last_run_cmd: Option<String>,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1477,6 +1480,7 @@ impl Editor {
             compiler_diagnostics: Vec::new(),
             compiler_diag_cursor: None,
             last_run_output: None,
+            last_run_cmd: None,
         }
     }
 

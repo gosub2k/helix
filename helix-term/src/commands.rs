@@ -4218,7 +4218,12 @@ fn show_run_output(cx: &mut Context) {
             return;
         }
     };
-    let popup = typed::build_output_popup(cx.editor, &output);
+    let title = cx
+        .editor
+        .last_run_cmd
+        .clone()
+        .unwrap_or_else(|| "output".to_string());
+    let popup = typed::build_output_popup(cx.editor, &title, &output);
     cx.push_layer(Box::new(popup));
 }
 
