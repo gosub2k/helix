@@ -3050,10 +3050,63 @@ fn parse_compiler_output(
         return Vec::new();
     }
 
-    output
-        .lines()
-        .filter_map(|line| parse_line(line, &patterns, cwd))
-        .collect()
+    // Python-style exception summary: `ExceptionName: message` on its own
+    // line, where the name ends in Error / Exception / Warning / Interrupt
+    // / Exit. This is how plain tracebacks and pytest long-tb output
+    // terminate: frames first with empty messages, exception summary last.
+    // Compiled once and reused; `Lazy` isn't needed — we're in a hot path
+    // only per :run invocation, which is cheap.
+    let exception_re = regex::Regex::new(
+        r"^(?P<name>[A-Z][A-Za-z0-9_.]*(?:Error|Exception|Warning|Interrupt|Exit))(?:: (?P<message>.+))?$",
+    )
+    .expect("static regex");
+
+    let mut errors: Vec<helix_view::editor::ParsedError> = Vec::new();
+    // Index of the ParsedError representing the current (still-open)
+    // traceback. Consecutive empty-message frames collapse into this one
+    // entry so a single runtime error produces a single quickfix item.
+    // Cleared when we attach an exception summary or start a new one.
+    let mut pending_idx: Option<usize> = None;
+
+    for line in output.lines() {
+        if let Some(err) = parse_line(line, &patterns, cwd) {
+            if err.message.is_empty() {
+                // In the middle of a traceback — collapse into the
+                // innermost frame. Later frames shadow earlier ones so
+                // the entry ends up pointing at where the error was
+                // raised, not where the call chain began.
+                if let Some(idx) = pending_idx {
+                    errors[idx] = err;
+                } else {
+                    pending_idx = Some(errors.len());
+                    errors.push(err);
+                }
+            } else {
+                // Fully-formed diagnostic (e.g. pytest --tb=line, gcc).
+                pending_idx = None;
+                errors.push(err);
+            }
+            continue;
+        }
+
+        if let Some(idx) = pending_idx {
+            if let Some(caps) = exception_re.captures(line) {
+                let name = caps.name("name").map(|m| m.as_str()).unwrap_or("");
+                let message = caps
+                    .name("message")
+                    .map(|m| m.as_str())
+                    .unwrap_or("");
+                errors[idx].message = if message.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name}: {message}")
+                };
+                pending_idx = None;
+            }
+        }
+    }
+
+    errors
 }
 
 /// Shared implementation for `:run` and `:test`. Runs `cmd` through the user's
