@@ -11,6 +11,43 @@ use tui::buffer::Buffer as Surface;
 use tui::text::{Span, Spans, Text};
 use tui::widgets::{Paragraph, Widget, Wrap};
 
+/// Remove ANSI escape sequences (SGR, cursor moves, OSC, etc.) from a
+/// string, leaving only the visible text. Used to feed a clean stream to
+/// the compiler-output regex parser while the raw stream is still
+/// available for the popup to render in colour.
+pub fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for nc in chars.by_ref() {
+                    if nc.is_ascii_alphabetic() || nc == '~' {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(nc) = chars.next() {
+                    if nc == '\x07' {
+                        break;
+                    }
+                    if nc == '\x1b' {
+                        let _ = chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
 pub fn ansi_to_text(input: &str) -> Text<'static> {
     let mut lines: Vec<Spans<'static>> = Vec::new();
     let mut current_line: Vec<Span<'static>> = Vec::new();

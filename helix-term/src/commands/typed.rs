@@ -3142,7 +3142,12 @@ fn run_shell_cmd_with_output(
     let cmd_for_title = cmd.clone();
     let callback = async move {
         let (output, exit_code) = shell_impl_async_unchecked(&shell, &cmd).await?;
-        let errors = parse_compiler_output(&output, &cwd, &error_formats);
+        // FORCE_COLOR makes the popup pretty but embeds ANSI escapes in
+        // `output`; regex patterns like `file:line: message` fail to match
+        // through those escapes. Parse against a stripped copy; keep the
+        // original intact for the popup's AnsiText widget.
+        let plain = crate::ui::ansi::strip_ansi(&output);
+        let errors = parse_compiler_output(&plain, &cwd, &error_formats);
 
         let call: job::Callback = Callback::EditorCompositor(Box::new(
             move |editor: &mut Editor, compositor: &mut Compositor| {
