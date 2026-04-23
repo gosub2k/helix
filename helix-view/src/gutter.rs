@@ -167,15 +167,49 @@ pub fn line_numbers<'doc>(
     // document or not.  We only draw it if it's not an empty line.
     let draw_last = text.line_to_byte(last_line_in_view) < text.len_bytes();
 
-    let linenr = theme.get("ui.linenr");
-    let linenr_select = theme.get("ui.linenr.selected");
+    // Mode-aware gutter styling (gated on editor.color-modes, matching the
+    // statusline). Theme keys `ui.linenr.{insert,select}` and
+    // `ui.linenr.selected.{insert,select}` override the base scopes when the
+    // corresponding mode is active. Falls back silently when a theme doesn't
+    // define them, so existing themes keep their old look.
+    let mode = editor.mode;
+    let color_modes = editor.config().color_modes;
+    let linenr = {
+        let base = theme.get("ui.linenr");
+        if color_modes {
+            use crate::document::Mode;
+            match mode {
+                Mode::Insert => theme.try_get("ui.linenr.insert").unwrap_or(base),
+                Mode::Select => theme.try_get("ui.linenr.select").unwrap_or(base),
+                Mode::Normal => base,
+            }
+        } else {
+            base
+        }
+    };
+    let linenr_select = {
+        let base = theme.get("ui.linenr.selected");
+        if color_modes {
+            use crate::document::Mode;
+            match mode {
+                Mode::Insert => theme
+                    .try_get("ui.linenr.selected.insert")
+                    .unwrap_or(base),
+                Mode::Select => theme
+                    .try_get("ui.linenr.selected.select")
+                    .unwrap_or(base),
+                Mode::Normal => base,
+            }
+        } else {
+            base
+        }
+    };
 
     let current_line = doc
         .text()
         .char_to_line(doc.selection(view.id).primary().cursor(text));
 
     let line_number = editor.config().line_number;
-    let mode = editor.mode;
 
     Box::new(
         move |line: usize, selected: bool, first_visual_line: bool, out: &mut String| {
