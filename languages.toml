@@ -881,8 +881,17 @@ block-comment-tokens = { start = "/*", end = "*/" }
 language-servers = [ "gopls", "golangci-lint-lsp" ]
 # TODO: gopls needs utf-8 offsets?
 indent = { tab-width = 4, unit = "\t" }
+run-command = "go run %"
+test-command = "go test ./..."
 error-formats = [
-  { pattern = "^(?P<file>[^:]+):(?P<line>\\d+):(?P<col>\\d+): (?P<message>.+)$" },
+  # go build / go vet / gopls: `path/to/file.go:line:col: message`
+  { pattern = "^(?P<file>[^:\\s][^:]*?\\.go):(?P<line>\\d+):(?P<col>\\d+): (?P<message>.+)$" },
+  # go test failure line (indented by t.Errorf/Logf): `    file_test.go:42: message`
+  { pattern = "^\\s+(?P<file>[^:\\s][^:]*?\\.go):(?P<line>\\d+):\\s+(?P<message>.+)$" },
+  # Go panics aren't covered here: their stack frames span runtime and
+  # stdlib files as well as user code, so a naïve `.go:line` match
+  # pollutes the quickfix list. Revisit with a stateful panic pass
+  # (anchor on `panic: …` then read until the first user-code frame).
 ]
 
 [language.debugger]
